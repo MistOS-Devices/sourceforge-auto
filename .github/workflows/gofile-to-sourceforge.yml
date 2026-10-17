@@ -4,9 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       gofile_url:
-        description: "Gofile share/download URL"
-        required: true
+        description: "OPTIONAL: Main ROM/file Gofile URL. Leave empty to upload optional files only."
+        required: false
         type: string
+        default: ""
 
       device:
         description: "Device name (example: raphael, bluejay, lisa, sweet, raven)"
@@ -147,8 +148,8 @@ jobs:
             | sed '/^$/d')"
           EXTRA_FOLDER="$(echo "$EXTRA_FOLDER_INPUT" | xargs)"
 
-          if [[ -z "$GOFILE_URL" ]]; then
-            echo "ERROR: Gofile URL is empty."
+          if [[ -z "$GOFILE_URL" && -z "$EXTRA_GOFILE_URLS" ]]; then
+            echo "ERROR: Provide a main Gofile URL or at least one optional Gofile URL."
             exit 1
           fi
 
@@ -157,8 +158,8 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$GOFILE_URL" =~ ^https?:// ]]; then
-            echo "ERROR: Invalid Gofile URL."
+          if [[ -n "$GOFILE_URL" && ! "$GOFILE_URL" =~ ^https?:// ]]; then
+            echo "ERROR: Invalid main Gofile URL."
             exit 1
           fi
 
@@ -217,6 +218,7 @@ jobs:
       # ============================================================
 
       - name: Extract Gofile ID
+        if: ${{ inputs.gofile_url != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -608,6 +610,7 @@ jobs:
       # ============================================================
 
       - name: Get Gofile content metadata
+        if: ${{ inputs.gofile_url != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -695,6 +698,7 @@ jobs:
       # ============================================================
 
       - name: Extract Gofile file information
+        if: ${{ inputs.gofile_url != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -850,6 +854,7 @@ jobs:
       # ============================================================
 
       - name: Download file from Gofile
+        if: ${{ inputs.gofile_url != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -950,6 +955,7 @@ jobs:
       # ============================================================
 
       - name: Verify downloaded ROM
+        if: ${{ inputs.gofile_url != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1189,6 +1195,7 @@ jobs:
       # ============================================================
 
       - name: Upload ROM to SourceForge
+        if: ${{ inputs.gofile_url != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1232,6 +1239,7 @@ jobs:
       # ============================================================
 
       - name: Verify SourceForge upload
+        if: ${{ inputs.gofile_url != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1456,8 +1464,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          SOURCEFORGE_URL="https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/$FILE_NAME"
-
           echo
           echo "============================================================"
           echo "                 MISTOS UPLOAD COMPLETE"
@@ -1467,25 +1473,20 @@ jobs:
           echo "Device:"
           echo "  $DEVICE"
 
-          echo
-          echo "File:"
-          echo "  $FILE_NAME"
+          if [[ -n "${FILE_NAME:-}" ]]; then
+            SOURCEFORGE_URL="https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/$FILE_NAME"
 
-          echo
-          echo "Size:"
-          echo "  $(numfmt --to=iec "$FILE_SIZE")"
-
-          echo
-          echo "SHA256:"
-          echo "  $FILE_SHA256"
-
-          echo
-          echo "SourceForge URL:"
-          echo "  $SOURCEFORGE_URL"
-
-          echo
-          echo "Remote path:"
-          echo "  $SOURCEFORGE_BASE/$DEVICE/$FILE_NAME"
+            echo
+            echo "Main file uploaded:"
+            echo "  $FILE_NAME"
+            echo "Size: $(numfmt --to=iec "$FILE_SIZE")"
+            echo "SHA256: $FILE_SHA256"
+            echo "SourceForge URL: $SOURCEFORGE_URL"
+            echo "Remote path: $SOURCEFORGE_BASE/$DEVICE/$FILE_NAME"
+          else
+            echo
+            echo "Main ROM upload: skipped (optional-files-only mode)"
+          fi
 
           if [[ -n "${OPTIONAL_UPLOAD_SUMMARY:-}" && -f "$OPTIONAL_UPLOAD_SUMMARY" ]]; then
             echo
@@ -1506,7 +1507,6 @@ jobs:
 
           echo
           echo "============================================================"
-
 
       # ============================================================
       # CLEANUP
