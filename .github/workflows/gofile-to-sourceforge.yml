@@ -14,7 +14,7 @@ on:
         type: string
 
       extra_gofile_urls:
-        description: "OPTIONAL: Multiple Gofile URLs, one per line (one file per link)"
+        description: "OPTIONAL: Multiple Gofile URLs separated by commas (one file per link)"
         required: false
         type: string
         default: ""
@@ -137,7 +137,14 @@ jobs:
 
           GOFILE_URL="$(echo "$GOFILE_URL_INPUT" | xargs)"
           DEVICE="$(echo "$DEVICE_INPUT" | xargs)"
-          EXTRA_GOFILE_URLS="$(printf '%s' "$EXTRA_GOFILE_URLS_INPUT" | sed '/^[[:space:]]*$/d')"
+          # GitHub Actions workflow_dispatch inputs are single-line fields.
+          # Accept comma-separated URLs, newline-separated URLs, semicolons,
+          # and Markdown links copied from chat/browser pages.
+          EXTRA_GOFILE_URLS="$(printf '%s' "$EXTRA_GOFILE_URLS_INPUT" \
+            | sed -E 's#\[([^]]+)\]\((https?://[^)]+)\)#\2#g' \
+            | tr ',;' '\n\n' \
+            | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+            | sed '/^$/d')"
           EXTRA_FOLDER="$(echo "$EXTRA_FOLDER_INPUT" | xargs)"
 
           if [[ -z "$GOFILE_URL" ]]; then
@@ -1406,7 +1413,7 @@ jobs:
             echo "Uploading $FILE_NAME..."
             if ! rsync -avP --partial --inplace --human-readable \
               -e "ssh -o BatchMode=yes -o ConnectTimeout=30" \
-              "$LOCAL_FILE" "sourceforge-frs:$EXTRA_REMOTE_DIR/"; then
+              "$LOCAL_FILE" "sourceforge-frs:$EXTRA_REMOTE_DIR/$FILE_NAME"; then
               echo "ERROR: Upload failed for $FILE_NAME"
               FAILED=$((FAILED + 1)); continue
             fi
@@ -1425,7 +1432,7 @@ jobs:
             PUBLIC_URL="https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/${EXTRA_FOLDER:+$EXTRA_FOLDER/}$FILE_NAME"
             printf '%s|%s|%s|%s\n' "$FILE_NAME" "$SIZE" "$SHA" "$PUBLIC_URL" >> "$SUMMARY"
             echo "Verified: $FILE_NAME ($SIZE bytes)"
-          done <<< "$EXTRA_GOFILE_URLS_INPUT"
+          done <<< "$EXTRA_GOFILE_URLS"
 
           if [[ "$COUNT" -eq 0 ]]; then
             echo "ERROR: No non-empty optional Gofile URLs were provided."
