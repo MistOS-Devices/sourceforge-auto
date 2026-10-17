@@ -13,8 +13,8 @@ on:
         required: true
         type: string
 
-      extra_gofile_url:
-        description: "OPTIONAL: Gofile URL for an extra file (IMG, ZIP, recovery image, etc.)"
+      extra_gofile_urls:
+        description: "OPTIONAL: Multiple Gofile URLs, one per line (one file per link)"
         required: false
         type: string
         default: ""
@@ -130,14 +130,14 @@ jobs:
         env:
           GOFILE_URL_INPUT: ${{ inputs.gofile_url }}
           DEVICE_INPUT: ${{ inputs.device }}
-          EXTRA_GOFILE_URL_INPUT: ${{ inputs.extra_gofile_url }}
+          EXTRA_GOFILE_URLS_INPUT: ${{ inputs.extra_gofile_urls }}
           EXTRA_FOLDER_INPUT: ${{ inputs.extra_folder }}
         run: |
           set -euo pipefail
 
           GOFILE_URL="$(echo "$GOFILE_URL_INPUT" | xargs)"
           DEVICE="$(echo "$DEVICE_INPUT" | xargs)"
-          EXTRA_GOFILE_URL="$(echo "$EXTRA_GOFILE_URL_INPUT" | xargs)"
+          EXTRA_GOFILE_URLS="$(printf '%s' "$EXTRA_GOFILE_URLS_INPUT" | sed '/^[[:space:]]*$/d')"
           EXTRA_FOLDER="$(echo "$EXTRA_FOLDER_INPUT" | xargs)"
 
           if [[ -z "$GOFILE_URL" ]]; then
@@ -161,10 +161,14 @@ jobs:
             exit 1
           fi
 
-          if [[ -n "$EXTRA_GOFILE_URL" && ! "$EXTRA_GOFILE_URL" =~ ^https?:// ]]; then
-            echo "ERROR: Optional extra Gofile URL is invalid."
-            exit 1
-          fi
+          while IFS= read -r EXTRA_URL; do
+            EXTRA_URL="$(echo "$EXTRA_URL" | xargs)"
+            [[ -z "$EXTRA_URL" ]] && continue
+            if [[ ! "$EXTRA_URL" =~ ^https?:// ]]; then
+              echo "ERROR: Invalid optional Gofile URL: $EXTRA_URL"
+              exit 1
+            fi
+          done <<< "$EXTRA_GOFILE_URLS"
 
           if [[ -n "$EXTRA_FOLDER" && ! "$EXTRA_FOLDER" =~ ^[A-Za-z0-9._-]+$ ]]; then
             echo "ERROR: Invalid extra subfolder name."
@@ -179,7 +183,11 @@ jobs:
 
           echo "GOFILE_URL=$GOFILE_URL" >> "$GITHUB_ENV"
           echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
-          echo "EXTRA_GOFILE_URL=$EXTRA_GOFILE_URL" >> "$GITHUB_ENV"
+          {
+            echo "EXTRA_GOFILE_URLS<<MISTOS_EXTRA_URLS_EOF"
+            printf '%s\n' "$EXTRA_GOFILE_URLS"
+            echo "MISTOS_EXTRA_URLS_EOF"
+          } >> "$GITHUB_ENV"
           echo "EXTRA_FOLDER=$EXTRA_FOLDER" >> "$GITHUB_ENV"
 
           echo
@@ -189,7 +197,7 @@ jobs:
 
           echo "Gofile URL       : $GOFILE_URL"
           echo "Device           : $DEVICE"
-          if [[ -n "$EXTRA_GOFILE_URL" ]]; then
+          if [[ -n "$EXTRA_GOFILE_URLS" ]]; then
             echo "Extra file upload: enabled"
             echo "Extra subfolder  : ${EXTRA_FOLDER:-<device root>}"
           else
@@ -962,206 +970,6 @@ jobs:
 
 
       # ============================================================
-      # OPTIONAL EXTRA FILE: EXTRACT GOFILE ID
-      # ============================================================
-
-      - name: Extract optional extra Gofile ID
-        if: ${{ inputs.extra_gofile_url != '' }}
-        shell: bash
-        env:
-          EXTRA_GOFILE_URL_INPUT: ${{ inputs.extra_gofile_url }}
-        run: |
-          set -euo pipefail
-
-          EXTRA_ID=""
-          if [[ "$EXTRA_GOFILE_URL_INPUT" =~ /d/([A-Za-z0-9]+) ]]; then
-            EXTRA_ID="${BASH_REMATCH[1]}"
-          elif [[ "$EXTRA_GOFILE_URL_INPUT" =~ /folder/([A-Za-z0-9]+) ]]; then
-            EXTRA_ID="${BASH_REMATCH[1]}"
-          elif [[ "$EXTRA_GOFILE_URL_INPUT" =~ /contents/([A-Za-z0-9]+) ]]; then
-            EXTRA_ID="${BASH_REMATCH[1]}"
-          fi
-
-          if [[ -z "$EXTRA_ID" ]]; then
-            echo "ERROR: Could not extract ID from optional Gofile URL."
-            exit 1
-          fi
-
-          echo "EXTRA_GOFILE_ID=$EXTRA_ID" >> "$GITHUB_ENV"
-          echo "Optional extra Gofile ID extracted."
-
-
-      # ============================================================
-      # OPTIONAL EXTRA FILE: GET GOFILE METADATA
-      # ============================================================
-
-      - name: Get optional extra Gofile metadata
-        if: ${{ inputs.extra_gofile_url != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo
-          echo "=============================================="
-          echo "GET OPTIONAL EXTRA FILE METADATA"
-          echo "=============================================="
-
-          RESPONSE="$WORK_DIR/extra-content.json"
-          SUCCESS=0
-          CURRENT_WINDOW="$(( $(date +%s) / 14400 ))"
-
-          for OFFSET in 0 1 2 3; do
-            TIME_WINDOW="$((CURRENT_WINDOW - OFFSET))"
-            echo "Trying WT time window: $TIME_WINDOW"
-
-            INPUT="${GOFILE_USER_AGENT}::${GOFILE_LANGUAGE}::${GOFILE_TOKEN}::${TIME_WINDOW}::${GOFILE_WT_SECRET}"
-            WT="$(printf '%s' "$INPUT" | sha256sum | awk '{print $1}')"
-
-            HTTP_STATUS="$(
-              curl \
-                --silent --show-error --location --compressed \
-                --output "$RESPONSE" --write-out "%{http_code}" \
-                --connect-timeout 30 --max-time 90 \
-                -A "$GOFILE_USER_AGENT" \
-                -H "Accept: application/json" \
-                -H "Authorization: Bearer $GOFILE_TOKEN" \
-                -H "X-Website-Token: $WT" \
-                -H "X-BL: $GOFILE_LANGUAGE" \
-                -H "Origin: https://gofile.io" \
-                -H "Referer: https://gofile.io/" \
-                -G \
-                --data-urlencode "contentFilter=" \
-                --data-urlencode "page=1" \
-                --data-urlencode "pageSize=1000" \
-                --data-urlencode "sortField=name" \
-                --data-urlencode "sortDirection=1" \
-                "https://api.gofile.io/contents/${EXTRA_GOFILE_ID}"
-            )"
-
-            echo "HTTP status: $HTTP_STATUS"
-            if [[ "$HTTP_STATUS" == "200" ]] &&
-               jq -e '.status == "ok"' "$RESPONSE" >/dev/null 2>&1; then
-              SUCCESS=1
-              break
-            fi
-          done
-
-          if [[ "$SUCCESS" != "1" ]]; then
-            echo "ERROR: Could not retrieve optional extra file metadata."
-            head -c 3000 "$RESPONSE" || true
-            exit 1
-          fi
-
-          DATA_TYPE="$(jq -r '.data.type // empty' "$RESPONSE")"
-          if [[ "$DATA_TYPE" == "file" ]]; then
-            CHILD="$(jq -c '.data' "$RESPONSE")"
-          else
-            CHILD_TYPE="$(jq -r '.data.children | type' "$RESPONSE")"
-            CHILD_COUNT="$(jq '.data.children | length' "$RESPONSE")"
-            if [[ "$CHILD_COUNT" != "1" ]]; then
-              echo "ERROR: Optional Gofile URL must contain exactly one file."
-              echo "Children found: $CHILD_COUNT"
-              exit 1
-            fi
-            if [[ "$CHILD_TYPE" == "object" ]]; then
-              CHILD="$(jq -c '.data.children | to_entries[0].value' "$RESPONSE")"
-            elif [[ "$CHILD_TYPE" == "array" ]]; then
-              CHILD="$(jq -c '.data.children[0]' "$RESPONSE")"
-            else
-              echo "ERROR: Unknown optional Gofile content structure."
-              exit 1
-            fi
-          fi
-
-          EXTRA_DOWNLOAD_URL="$(echo "$CHILD" | jq -r '.link // empty')"
-          EXTRA_FILE_NAME="$(echo "$CHILD" | jq -r '.name // empty' | xargs basename)"
-          EXTRA_FILE_ID="$(echo "$CHILD" | jq -r '.id // empty')"
-
-          if [[ -z "$EXTRA_DOWNLOAD_URL" || -z "$EXTRA_FILE_NAME" || -z "$EXTRA_FILE_ID" ]]; then
-            echo "ERROR: Optional file metadata is incomplete."
-            exit 1
-          fi
-
-          if [[ ! "$EXTRA_FILE_NAME" =~ ^[A-Za-z0-9._+-]+$ ]]; then
-            echo "ERROR: Optional filename contains unsupported characters: $EXTRA_FILE_NAME"
-            exit 1
-          fi
-
-          echo "EXTRA_DOWNLOAD_URL=$EXTRA_DOWNLOAD_URL" >> "$GITHUB_ENV"
-          echo "EXTRA_FILE_NAME=$EXTRA_FILE_NAME" >> "$GITHUB_ENV"
-          echo "EXTRA_FILE_ID=$EXTRA_FILE_ID" >> "$GITHUB_ENV"
-
-          echo "Optional filename: $EXTRA_FILE_NAME"
-
-
-      # ============================================================
-      # OPTIONAL EXTRA FILE: DOWNLOAD AND VALIDATE
-      # ============================================================
-
-      - name: Download optional extra file from Gofile
-        if: ${{ inputs.extra_gofile_url != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUTPUT="$WORK_DIR/$EXTRA_FILE_NAME"
-          COOKIE_JAR="$WORK_DIR/gofile.cookies"
-
-          echo
-          echo "=============================================="
-          echo "DOWNLOAD OPTIONAL EXTRA FILE"
-          echo "=============================================="
-          echo "Filename: $EXTRA_FILE_NAME"
-
-          rm -f "$OUTPUT"
-
-          curl \
-            --fail --silent --show-error --location \
-            --retry 5 --retry-delay 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 7200 \
-            --cookie "$COOKIE_JAR" --cookie-jar "$COOKIE_JAR" \
-            -A "$GOFILE_USER_AGENT" \
-            -H "Accept: */*" \
-            -H "Authorization: Bearer $GOFILE_TOKEN" \
-            -H "Origin: https://gofile.io" \
-            -H "Referer: $EXTRA_GOFILE_URL" \
-            --output "$OUTPUT" \
-            "$EXTRA_DOWNLOAD_URL"
-
-          if [[ ! -s "$OUTPUT" ]]; then
-            echo "ERROR: Optional extra file is empty or missing."
-            exit 1
-          fi
-
-          EXTRA_FILE_SIZE="$(stat -c '%s' "$OUTPUT")"
-          EXTRA_FILE_TYPE="$(file -b "$OUTPUT")"
-
-          echo "Size: $EXTRA_FILE_SIZE bytes"
-          echo "Type: $EXTRA_FILE_TYPE"
-
-          if [[ "$EXTRA_FILE_SIZE" -lt 1024 ]]; then
-            echo "ERROR: Optional extra file is suspiciously small."
-            head -c 500 "$OUTPUT" | cat -v || true
-            exit 1
-          fi
-
-          case "$EXTRA_FILE_TYPE" in
-            *HTML*|*XML*|*JSON*|*ASCII\ text*|*Unicode\ text*)
-              echo "ERROR: Gofile returned a webpage/text instead of the requested file."
-              head -c 500 "$OUTPUT" | cat -v || true
-              exit 1
-              ;;
-          esac
-
-          EXTRA_FILE_SHA256="$(sha256sum "$OUTPUT" | awk '{print $1}')"
-          echo "EXTRA_FILE_SIZE=$EXTRA_FILE_SIZE" >> "$GITHUB_ENV"
-          echo "EXTRA_FILE_SHA256=$EXTRA_FILE_SHA256" >> "$GITHUB_ENV"
-
-          echo "Optional file downloaded and validated."
-          echo "SHA256: $EXTRA_FILE_SHA256"
-
-
-      # ============================================================
       # CONFIGURE SOURCEFORGE SSH
       # ============================================================
 
@@ -1468,12 +1276,14 @@ jobs:
 
 
       # ============================================================
-      # OPTIONAL EXTRA FILE: CREATE SUBFOLDER IF NEEDED
+      # OPTIONAL EXTRA FILES: DOWNLOAD, UPLOAD AND VERIFY EACH URL
       # ============================================================
 
-      - name: Prepare optional extra-file directory
-        if: ${{ inputs.extra_gofile_url != '' }}
+      - name: Upload optional files to SourceForge
+        if: ${{ inputs.extra_gofile_urls != '' }}
         shell: bash
+        env:
+          EXTRA_GOFILE_URLS_INPUT: ${{ inputs.extra_gofile_urls }}
         run: |
           set -euo pipefail
 
@@ -1483,14 +1293,13 @@ jobs:
             EXTRA_REMOTE_DIR="$SOURCEFORGE_BASE/$DEVICE"
           fi
 
-          echo
           echo "=============================================="
-          echo "PREPARE OPTIONAL EXTRA-FILE DIRECTORY"
-          echo "=============================================="
+          echo "UPLOAD OPTIONAL GOFILE FILES"
           echo "Destination: $EXTRA_REMOTE_DIR"
+          echo "=============================================="
 
-          # SFTP batch mode has no mkdir -p. Prefix mkdir commands with '-'
-          # so existing directories do not abort the batch.
+          # Ensure destination directories exist. SourceForge's restricted shell
+          # supports SFTP/rsync, not arbitrary remote shell commands.
           SFTP_SCRIPT="$WORK_DIR/extra-mkdir.sftp"
           cat > "$SFTP_SCRIPT" <<EOF
           -mkdir $SOURCEFORGE_BASE
@@ -1498,102 +1307,137 @@ jobs:
           -mkdir $EXTRA_REMOTE_DIR
           quit
           EOF
+          sftp -o BatchMode=yes -o ConnectTimeout=30 -b "$SFTP_SCRIPT" sourceforge-frs
 
-          sftp \
-            -o BatchMode=yes \
-            -o ConnectTimeout=30 \
-            -b "$SFTP_SCRIPT" \
-            sourceforge-frs
+          SUMMARY="$WORK_DIR/optional-upload-summary.txt"
+          : > "$SUMMARY"
+          COUNT=0
+          FAILED=0
 
-          echo "Optional destination directory is ready."
+          while IFS= read -r URL || [[ -n "$URL" ]]; do
+            URL="$(echo "$URL" | xargs)"
+            [[ -z "$URL" ]] && continue
+            COUNT=$((COUNT + 1))
+            echo
+            echo "[$COUNT] Processing: $URL"
 
+            EXTRA_ID=""
+            if [[ "$URL" =~ /d/([A-Za-z0-9]+) ]]; then
+              EXTRA_ID="${BASH_REMATCH[1]}"
+            elif [[ "$URL" =~ /folder/([A-Za-z0-9]+) ]]; then
+              EXTRA_ID="${BASH_REMATCH[1]}"
+            elif [[ "$URL" =~ /contents/([A-Za-z0-9]+) ]]; then
+              EXTRA_ID="${BASH_REMATCH[1]}"
+            fi
+            if [[ -z "$EXTRA_ID" ]]; then
+              echo "ERROR: Could not extract Gofile ID from URL."
+              FAILED=$((FAILED + 1)); continue
+            fi
 
-      # ============================================================
-      # OPTIONAL EXTRA FILE: UPLOAD
-      # ============================================================
+            RESPONSE="$WORK_DIR/extra-content-$COUNT.json"
+            SUCCESS=0
+            CURRENT_WINDOW="$(( $(date +%s) / 14400 ))"
+            for OFFSET in 0 1 2 3; do
+              TIME_WINDOW="$((CURRENT_WINDOW - OFFSET))"
+              INPUT="${GOFILE_USER_AGENT}::${GOFILE_LANGUAGE}::${GOFILE_TOKEN}::${TIME_WINDOW}::${GOFILE_WT_SECRET}"
+              WT="$(printf '%s' "$INPUT" | sha256sum | awk '{print $1}')"
+              HTTP_STATUS="$(curl --silent --show-error --location --compressed \
+                --output "$RESPONSE" --write-out "%{http_code}" \
+                --connect-timeout 30 --max-time 90 \
+                -A "$GOFILE_USER_AGENT" -H "Accept: application/json" \
+                -H "Authorization: Bearer $GOFILE_TOKEN" -H "X-Website-Token: $WT" \
+                -H "X-BL: $GOFILE_LANGUAGE" -H "Origin: https://gofile.io" \
+                -H "Referer: https://gofile.io/" -G \
+                --data-urlencode "contentFilter=" --data-urlencode "page=1" \
+                --data-urlencode "pageSize=1000" --data-urlencode "sortField=name" \
+                --data-urlencode "sortDirection=1" \
+                "https://api.gofile.io/contents/${EXTRA_ID}")"
+              if [[ "$HTTP_STATUS" == "200" ]] && jq -e '.status == "ok"' "$RESPONSE" >/dev/null 2>&1; then
+                SUCCESS=1; break
+              fi
+            done
+            if [[ "$SUCCESS" != "1" ]]; then
+              echo "ERROR: Could not retrieve metadata for URL $URL"
+              FAILED=$((FAILED + 1)); continue
+            fi
 
-      - name: Upload optional extra file to SourceForge
-        if: ${{ inputs.extra_gofile_url != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
+            DATA_TYPE="$(jq -r '.data.type // empty' "$RESPONSE")"
+            if [[ "$DATA_TYPE" == "file" ]]; then
+              CHILD="$(jq -c '.data' "$RESPONSE")"
+            else
+              CHILD_COUNT="$(jq '.data.children | length' "$RESPONSE")"
+              if [[ "$CHILD_COUNT" != "1" ]]; then
+                echo "ERROR: Each Gofile link must resolve to exactly one file; found $CHILD_COUNT."
+                FAILED=$((FAILED + 1)); continue
+              fi
+              CHILD="$(jq -c 'if (.data.children|type)=="array" then .data.children[0] else (.data.children|to_entries[0].value) end' "$RESPONSE")"
+            fi
 
-          LOCAL_FILE="$WORK_DIR/$EXTRA_FILE_NAME"
-          if [[ -n "$EXTRA_FOLDER" ]]; then
-            EXTRA_REMOTE_DIR="$SOURCEFORGE_BASE/$DEVICE/$EXTRA_FOLDER"
-          else
-            EXTRA_REMOTE_DIR="$SOURCEFORGE_BASE/$DEVICE"
-          fi
+            DOWNLOAD_URL="$(echo "$CHILD" | jq -r '.link // empty')"
+            FILE_NAME="$(echo "$CHILD" | jq -r '.name // empty' | xargs basename)"
+            FILE_ID="$(echo "$CHILD" | jq -r '.id // empty')"
+            if [[ -z "$DOWNLOAD_URL" || -z "$FILE_NAME" || -z "$FILE_ID" || ! "$FILE_NAME" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+              echo "ERROR: File metadata/name is invalid for URL $URL"
+              FAILED=$((FAILED + 1)); continue
+            fi
 
-          echo
-          echo "=============================================="
-          echo "UPLOAD OPTIONAL EXTRA FILE"
-          echo "=============================================="
-          echo "Local: $LOCAL_FILE"
-          echo "Remote: $EXTRA_REMOTE_DIR/"
+            LOCAL_FILE="$WORK_DIR/optional-$COUNT-$FILE_NAME"
+            COOKIE_JAR="$WORK_DIR/gofile.cookies"
+            if ! curl --fail --silent --show-error --location --retry 5 --retry-delay 5 \
+              --retry-all-errors --connect-timeout 30 --max-time 7200 \
+              --cookie "$COOKIE_JAR" --cookie-jar "$COOKIE_JAR" \
+              -A "$GOFILE_USER_AGENT" -H "Accept: */*" \
+              -H "Authorization: Bearer $GOFILE_TOKEN" -H "Origin: https://gofile.io" \
+              -H "Referer: $URL" --output "$LOCAL_FILE" "$DOWNLOAD_URL"; then
+              echo "ERROR: Download failed for $FILE_NAME"
+              FAILED=$((FAILED + 1)); continue
+            fi
+            if [[ ! -s "$LOCAL_FILE" ]] || [[ "$(stat -c '%s' "$LOCAL_FILE")" -lt 1024 ]]; then
+              echo "ERROR: Downloaded file is empty or suspiciously small: $FILE_NAME"
+              FAILED=$((FAILED + 1)); continue
+            fi
+            FILE_TYPE="$(file -b "$LOCAL_FILE")"
+            case "$FILE_TYPE" in
+              *HTML*|*XML*|*JSON*|*ASCII\ text*|*Unicode\ text*)
+                echo "ERROR: Gofile returned text/webpage instead of a file: $FILE_NAME"
+                FAILED=$((FAILED + 1)); continue ;;
+            esac
 
-          rsync \
-            -avP \
-            --partial \
-            --inplace \
-            --human-readable \
-            -e "ssh -o BatchMode=yes -o ConnectTimeout=30" \
-            "$LOCAL_FILE" \
-            "sourceforge-frs:$EXTRA_REMOTE_DIR/"
+            echo "Uploading $FILE_NAME..."
+            if ! rsync -avP --partial --inplace --human-readable \
+              -e "ssh -o BatchMode=yes -o ConnectTimeout=30" \
+              "$LOCAL_FILE" "sourceforge-frs:$EXTRA_REMOTE_DIR/"; then
+              echo "ERROR: Upload failed for $FILE_NAME"
+              FAILED=$((FAILED + 1)); continue
+            fi
 
-          echo "Optional extra-file upload completed."
+            VERIFY_SCRIPT="$WORK_DIR/extra-verify-$COUNT.sftp"
+            VERIFY_OUTPUT="$WORK_DIR/extra-verify-$COUNT.txt"
+            printf 'ls -l %s/%s\nquit\n' "$EXTRA_REMOTE_DIR" "$FILE_NAME" > "$VERIFY_SCRIPT"
+            if ! sftp -o BatchMode=yes -o ConnectTimeout=30 -b "$VERIFY_SCRIPT" sourceforge-frs > "$VERIFY_OUTPUT" 2>&1 || ! grep -Fq "$FILE_NAME" "$VERIFY_OUTPUT"; then
+              cat "$VERIFY_OUTPUT" || true
+              echo "ERROR: Remote verification failed for $FILE_NAME"
+              FAILED=$((FAILED + 1)); continue
+            fi
 
+            SIZE="$(stat -c '%s' "$LOCAL_FILE")"
+            SHA="$(sha256sum "$LOCAL_FILE" | awk '{print $1}')"
+            PUBLIC_URL="https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/${EXTRA_FOLDER:+$EXTRA_FOLDER/}$FILE_NAME"
+            printf '%s|%s|%s|%s\n' "$FILE_NAME" "$SIZE" "$SHA" "$PUBLIC_URL" >> "$SUMMARY"
+            echo "Verified: $FILE_NAME ($SIZE bytes)"
+          done <<< "$EXTRA_GOFILE_URLS_INPUT"
 
-      # ============================================================
-      # OPTIONAL EXTRA FILE: VERIFY REMOTE FILE
-      # ============================================================
-
-      - name: Verify optional extra-file upload
-        if: ${{ inputs.extra_gofile_url != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ -n "$EXTRA_FOLDER" ]]; then
-            EXTRA_REMOTE_DIR="$SOURCEFORGE_BASE/$DEVICE/$EXTRA_FOLDER"
-          else
-            EXTRA_REMOTE_DIR="$SOURCEFORGE_BASE/$DEVICE"
-          fi
-
-          REMOTE_FILE="$EXTRA_REMOTE_DIR/$EXTRA_FILE_NAME"
-          VERIFY_SCRIPT="$WORK_DIR/extra-verify.sftp"
-          VERIFY_OUTPUT="$WORK_DIR/extra-verify-output.txt"
-
-          echo
-          echo "=============================================="
-          echo "VERIFY OPTIONAL EXTRA FILE"
-          echo "=============================================="
-          echo "Remote file: $REMOTE_FILE"
-
-          cat > "$VERIFY_SCRIPT" <<EOF
-          ls -l $REMOTE_FILE
-          quit
-          EOF
-
-          sftp \
-            -o BatchMode=yes \
-            -o ConnectTimeout=30 \
-            -b "$VERIFY_SCRIPT" \
-            sourceforge-frs \
-            > "$VERIFY_OUTPUT" 2>&1
-
-          cat "$VERIFY_OUTPUT"
-
-          if ! grep -Fq "$EXTRA_FILE_NAME" "$VERIFY_OUTPUT"; then
-            echo "ERROR: Optional file not found on SourceForge."
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "ERROR: No non-empty optional Gofile URLs were provided."
             exit 1
           fi
-
-          echo
-          echo "Optional file exists on SourceForge."
-          echo "Local size: $EXTRA_FILE_SIZE bytes"
-          echo "SHA256: $EXTRA_FILE_SHA256"
-          echo "Remote listing verification passed."
+          if [[ "$FAILED" -gt 0 ]]; then
+            echo "ERROR: $FAILED optional file(s) failed. See log above."
+            exit 1
+          fi
+          echo "OPTIONAL_UPLOAD_COUNT=$COUNT" >> "$GITHUB_ENV"
+          echo "OPTIONAL_UPLOAD_SUMMARY=$SUMMARY" >> "$GITHUB_ENV"
+          echo "All $COUNT optional file(s) uploaded and verified successfully."
 
 
       # ============================================================
@@ -1636,20 +1480,18 @@ jobs:
           echo "Remote path:"
           echo "  $SOURCEFORGE_BASE/$DEVICE/$FILE_NAME"
 
-          if [[ -n "$EXTRA_GOFILE_URL" ]]; then
+          if [[ -n "${OPTIONAL_UPLOAD_SUMMARY:-}" && -f "$OPTIONAL_UPLOAD_SUMMARY" ]]; then
             echo
-            echo "Optional extra file:"
-            echo "  $EXTRA_FILE_NAME"
-            echo "Extra destination:"
-            if [[ -n "$EXTRA_FOLDER" ]]; then
-              echo "  $SOURCEFORGE_BASE/$DEVICE/$EXTRA_FOLDER/"
-              echo "Extra public URL:"
-              echo "  https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/$EXTRA_FOLDER/$EXTRA_FILE_NAME"
-            else
-              echo "  $SOURCEFORGE_BASE/$DEVICE/"
-              echo "Extra public URL:"
-              echo "  https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/$EXTRA_FILE_NAME"
-            fi
+            echo "Optional files uploaded: ${OPTIONAL_UPLOAD_COUNT:-0}"
+            echo "Optional destination: $SOURCEFORGE_BASE/$DEVICE/${EXTRA_FOLDER:+$EXTRA_FOLDER/}"
+            while IFS='|' read -r NAME SIZE SHA URL; do
+              [[ -z "$NAME" ]] && continue
+              echo
+              echo "  File: $NAME"
+              echo "  Size: $(numfmt --to=iec "$SIZE")"
+              echo "  SHA256: $SHA"
+              echo "  URL: $URL"
+            done < "$OPTIONAL_UPLOAD_SUMMARY"
           else
             echo
             echo "Optional extra upload: skipped"
